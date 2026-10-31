@@ -18,4 +18,14 @@ Changed:
 
 - The add-on id is `dlss_render_plus`, so it installs next to the original instead of replacing it.
 - Objects are hidden and shown again in the window's own view layer, which matters when the queue switches scenes.
-- Output format settings are remembered before any of them change and restored in an order Blender accepts, so a movie or passes render no longer changes your color depth or color mode.
+- Output format settings are remembered before any of them change and restored in an order Blender accepts, so a movie or passes render no longer changes your color depth, color mode or output color space.
+- The picture is now lined up with a Cycles render to within 0.05 pixels. It used to sit 0.6 pixels off vertically in every upscale mode, which also put Cycles passes (Cryptomatte, depth) slightly out of line with the DLSS picture.
+- Disabling the add-on during a render could crash Blender: the render's timer kept running against a closed viewport. It's now stopped reliably.
+- An output folder that can't be created is reported before the render starts.
+- Viewport adaptive sampling is off during the render. Small or simple frames used to stop sampling early and then wait 15 seconds each.
+- Saving the .blend during a render puts every setting back first and stops the render, so the file is saved the way you left it. Opening another file or disabling the add-on stops a render cleanly.
+- Output > Overwrite off is respected for image sequences.
+- A relative output path in an unsaved file is caught before the render starts.
+- `#` in folder names is kept in movie paths, and `###` in the file name sets the padding.
+- Queue: entries can have their own output path, two entries writing the same files are refused, Render Queue (not Resume) deletes leftover movie frames, copied scenes no longer share queue progress, and a locked progress file no longer stops the render.
+- ffmpeg is also looked for in the usual Homebrew and Linux locations.

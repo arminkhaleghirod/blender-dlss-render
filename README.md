@@ -95,13 +95,15 @@ The extra render costs time on every frame, how much depends on the scene and th
 
 <p align="center"><img src="docs/images/steady.jpg" alt="Flicker heat maps with Steady off and on" width="100%"></p>
 
-On a static close-up of the glass, Steady cut the frame-to-frame flicker by 33% at the default strength of 0.6. It reduces flicker between frames, not the grain inside a single frame. Moving edges aren't blended with the previous frame, so it doesn't leave trails, and a camera cut resets it. It runs on the CPU and costs about 0.1 seconds per 1080p frame.
+On a static close-up of the glass, Steady cut the frame-to-frame flicker by 33% at the default strength of 0.6. It reduces flicker between frames, not the grain inside a single frame. Moving edges aren't blended with the previous frame, so it doesn't leave trails, and a camera cut resets it. It runs on the CPU: in the benchmark it added about 0.1 seconds per 1080p frame, and a 4K frame takes about 0.7 seconds.
 
 ## Render queue
 
-Open the Render Queue section and click + to add the current scene, camera and frame range. Each entry can have its own scene, camera and range, and uses that scene's DLSS settings (quality, passes, Steady, output). Render Queue starts everything from the beginning. Resume keeps what's already saved and renders the rest.
+Open the Render Queue section and click + to add the current scene, camera and frame range. Each entry can have its own scene, camera and range, and uses that scene's DLSS settings (quality, passes, Steady, output). If two entries render the same scene, for example with two cameras, give one of them its own Output path; the queue refuses to start when two entries would write the same files.
 
-Progress is saved after every frame in `<your file>.dlss_queue.json` next to the .blend, so Resume also works after a crash.
+Render Queue starts everything from the beginning, including movies: their leftover frames from an earlier run are deleted first. Resume keeps what's already saved and renders the rest. Progress is saved after every frame in `<your file>.dlss_queue.json` next to the .blend, so Resume also works after a crash.
+
+Saving the .blend while a render or queue is running stops it first, so the file never gets the render's temporary settings. Resume picks the queue up again.
 
 ## Limitations
 
@@ -110,7 +112,10 @@ Progress is saved after every frame in `<your file>.dlss_queue.json` next to the
 - No motion blur. Render the Vector pass and use a Vector Blur node if you need it.
 - Don't render anything else on the same graphics card at the same time. DLSS gets fewer samples and you get more grain.
 - While it renders, Blender's window is used for the render.
+- Only the window's active view layer is rendered (and gets passes).
 - Blender 5.3 has no RGBA option for ProRes, so ProRes output has no alpha. Use FFV1 or an image sequence if you need it.
+- Output > Overwrite off is respected (frames already on disk are kept). Placeholders aren't supported.
+- I've only tested on Windows. Blender's DLSS needs an NVIDIA RTX card, so macOS is out; Linux should work, but the add-on can't keep the screen awake there, so turn screen blanking off for long renders.
 
 ## Documentation
 

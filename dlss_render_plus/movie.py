@@ -19,19 +19,29 @@ class MovieError(Exception):
     pass
 
 
+# where package managers put ffmpeg; a Blender started from the Dock or a desktop menu doesn't see the shell's PATH
+FFMPEG_PLACES = ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg", "/snap/bin/ffmpeg")
+
+
 def find_ffmpeg(configured=""):
     path = bpy.path.abspath(configured) if configured else ""
     if path and os.path.isfile(path):
         return path
-    return shutil.which("ffmpeg")
+    return shutil.which("ffmpeg") or next((p for p in FFMPEG_PLACES if os.path.isfile(p)), None)
 
 
 def movie_path(scene, first, last):
-    """Where Blender itself would put the movie: the output path with the frame range, e.g. render_0001-0250.mp4."""
+    """Where Blender itself would put the movie: the output path with the frame range, e.g. render_0001-0250.mp4.
+    #### in the file name sets the padding of the numbers; # in folder names is left alone."""
     r = scene.render
-    base = bpy.path.abspath(r.filepath or "//")
-    base = re.sub(r"#+", "", base)
-    path = f"{base}{first:04d}-{last:04d}"
+    folder, name = os.path.split(bpy.path.abspath(r.filepath or "//"))
+    run = re.search(r"#+", name)
+    if run:
+        n = len(run.group())
+        name = name[:run.start()] + f"{first:0{n}d}-{last:0{n}d}" + name[run.end():]
+        path = os.path.join(folder, name)
+    else:
+        path = os.path.join(folder, f"{name}{first:04d}-{last:04d}")
     if r.use_file_extension:
         path += EXT.get(r.ffmpeg.format, ".mp4")
     return os.path.normpath(path)

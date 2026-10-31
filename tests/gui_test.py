@@ -95,6 +95,7 @@ def build_scene():
     sc.render.image_settings.media_type = "IMAGE"
     sc.render.image_settings.file_format = "PNG"
     sc.view_settings.view_transform = "AgX"
+    sc.render.filepath = os.path.join(OUT, "default", "x_")     # the file is unsaved: no relative output paths
     return sc
 
 
@@ -316,7 +317,8 @@ def steps():
     mtimes = {f: os.path.getmtime(os.path.join(da, f)) for f in first}
     check("gui.queue_stopped_early", 1 <= len(first) < 8, f"{len(first)} saved: {first}")
     store = rq.Store()
-    check("gui.queue_store", len(store.done("test1")) == len(first), f"store {sorted(store.done('test1'))}")
+    uid = s.queue[0].uid    # not "test1" any more: the copied scene took its queue along, so ours got fresh ids
+    check("gui.queue_store", len(store.done(uid)) == len(first), f"store {sorted(store.done(uid))}")
     yield 1.0
     start_op(bpy.ops.render.dlss_queue_run, resume=True)
     yield from wait_job()

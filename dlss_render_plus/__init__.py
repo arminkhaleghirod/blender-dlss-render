@@ -50,7 +50,7 @@ class DLSSRenderPrefs(bpy.types.AddonPreferences):
 
     ffmpeg_path: bpy.props.StringProperty(
         name="ffmpeg", subtype="FILE_PATH",
-        description="ffmpeg.exe used to make movies (empty: the one on the PATH)")
+        description="The ffmpeg program used to make movies (empty: look for it on the PATH)")
 
     def draw(self, context):
         from .movie import find_ffmpeg
@@ -199,9 +199,15 @@ def register():
         bpy.utils.register_class(c)
     bpy.types.Scene.dlss_render_plus = bpy.props.PointerProperty(type=DLSSRenderSettings)
     bpy.types.RENDER_PT_context.append(draw_render_context)
+    bpy.app.handlers.save_pre.append(render.on_save_pre)
+    bpy.app.handlers.load_pre.append(render.on_load_pre)
 
 
 def unregister():
+    render.stop_running("the add-on was disabled.")     # nothing may keep running against unregistered classes
+    for handlers, fn in ((bpy.app.handlers.save_pre, render.on_save_pre), (bpy.app.handlers.load_pre, render.on_load_pre)):
+        if fn in handlers:
+            handlers.remove(fn)
     bpy.types.RENDER_PT_context.remove(draw_render_context)
     del bpy.types.Scene.dlss_render_plus
     for c in reversed(classes):

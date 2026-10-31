@@ -29,6 +29,10 @@ QUALITY = {"DRAFT": 8, "BALANCED": 24, "HIGH": 64}
 # DLSS shows its picture half a pixel of its own (lower) render resolution to the right and up of where a normal
 # render puts it. These are the render scales of the upscale modes; the camera view is nudged the other way.
 UPSCALE = {"NONE": 1.0, "QUALITY": 2.0 / 3.0, "BALANCED": 0.58, "PERFORMANCE": 0.5, "ULTRA_PERFORMANCE": 1.0 / 3.0}
+# Measured: with only the correction above, the picture sat 0.6 output pixels off vertically from a Cycles render of
+# the same frame, in every upscale mode and on both the OpenGL and Vulkan backends (horizontally it was 0.01 px).
+# Moving it this much more brings it within 0.05 px (tests/align_gui.py, tests/align_cmp.py).
+NUDGE_Y = -0.58
 PANELS = ("show_region_header", "show_region_tool_header", "show_region_toolbar", "show_region_ui")
 RESTART_EVERY = 50      # frames between fresh starts of the viewport render in an animation (see run)
 PLAY_IN = 8             # frames stepped through, unsaved, before the first frame and after each fresh start
@@ -120,6 +124,14 @@ def room_limit():
     return tuple(int(n) for n in v.split("x")) if "x" in v else None
 
 
+def nudge_y_debug():
+    """Debug: extra vertical offset of the picture in pixels (set DLSS_RENDER_NUDGE_Y=0.5)."""
+    try:
+        return float(os.environ.get("DLSS_RENDER_NUDGE_Y", "0"))
+    except ValueError:
+        return 0.0
+
+
 def cycles_prefs(context):
     addon = context.preferences.addons.get("cycles")
     return addon.preferences if addon else None
@@ -156,6 +168,8 @@ def blocker(context, scene=None, window=None):
     s = sc.dlss_render_plus
     if s.passes and sc.render.is_movie_format:
         return "PASSES", "Render passes are saved as EXR frames: choose an image output, not a movie.", None
+    if not os.path.isabs(bpy.path.abspath(sc.render.filepath)):
+        return "OUTPUT", "The output path is relative: save the .blend first, or choose an output folder.", None
     if win is None or not find_view(win):
         return "VIEW", "Open a 3D Viewport in this window.", None
     return None
@@ -203,6 +217,7 @@ class Job:
         self.movie = None
         self.cam_last = None        # (camera, matrix) of the last rendered frame, for cut detection
         self.cam_moves = []
+        self.stop_reason = ""       # why the job was cancelled, when it wasn't Esc
 
         sc = self.scene
         block = blocker(bpy.context, sc, self.win)
@@ -223,6 +238,7 @@ class Job:
         self.pass_samples = s.pass_samples
         self.steady = Steady(s.steady_strength) if s.use_steady and animation else None
         self.keep_frames = s.keep_movie_frames
+        self.skipped = 0
         if sc.render.is_movie_format:
             if not animation:
                 raise JobError("The output is a movie: render an animation, or choose an image format for a still.")
@@ -231,7 +247,29 @@ class Job:
                 self.movie = movie_mod.Movie(sc, self.all_frames, movie_mod.find_ffmpeg(prefs.ffmpeg_path if prefs else ""))
             except movie_mod.MovieError as e:
                 raise JobError(str(e))
+        elif animation and not sc.render.use_overwrite:
+            # Output > Overwrite off: frames that are already on disk are kept, like a normal render does
+            todo = [f for f in self.frames if not os.path.exists(self.output_path(f))]
+            self.skipped = len(self.frames) - len(todo)
+            self.frames = todo
+            if not self.frames:
+                raise JobError("Every frame is already saved and Overwrite is off.")
+        # find out now, not after the set-up and the first frame's samples, if the output folder can't be written
+        folder = self.movie.dir if self.movie else os.path.dirname(self.output_path(self.all_frames[0]))
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            raise JobError(f"Can't create the output folder {folder}: {e.strerror or e}")
+        if not os.access(folder, os.W_OK):
+            raise JobError(f"The output folder {folder} isn't writable.")
         self.gen = self.run()
+
+    def output_path(self, frame):
+        """Where this frame is saved (passes are always EXR)."""
+        path = bpy.path.abspath(self.scene.render.frame_path(frame=frame))
+        if self.passes:
+            path = os.path.splitext(path)[0] + ".exr"
+        return path
 
     # ------------------------------------------------------------------ small helpers
 
@@ -394,6 +432,10 @@ class Job:
         except TypeError:
             raise JobError("DLSS is not available here. Check Render Properties > Sampling > Viewport > Denoise.")
         self.keep(c, "preview_samples", 0)      # no cap: the job decides when a frame has enough
+        # Viewport adaptive sampling stops a small or simple frame early, before it has the samples asked for;
+        # the wait would then sit out its 15 s safety timeout on every frame
+        if hasattr(c, "use_preview_adaptive_sampling"):
+            self.keep(c, "use_preview_adaptive_sampling", False)
         self.keep(r, "preview_pixel_size", "1")
         # no render region: with one, the picture comes out slightly stretched and shifted
         self.keep(r, "use_border", False)
@@ -401,9 +443,18 @@ class Job:
         self.nudge = 0.5 / UPSCALE.get(mode, 1.0) if mode else 0.0
         if self.movie or self.passes:
             # remember every output format setting before changing any: changing one can change the others
-            for attr in ("media_type", "file_format", "color_depth", "color_mode", "compression", "exr_codec"):
-                if hasattr(r.image_settings, attr):
-                    self.keep(r.image_settings, attr)
+            im = r.image_settings
+            for attr in ("media_type", "file_format", "color_depth", "color_mode", "compression", "exr_codec",
+                         "color_management"):
+                if hasattr(im, attr):
+                    self.keep(im, attr)
+            # the output's own colour space (Color Management: Override) changes with the format too
+            for obj, attrs in ((getattr(im, "linear_colorspace_settings", None), ("name",)),
+                               (getattr(im, "view_settings", None), ("view_transform", "look", "exposure", "gamma")),
+                               (getattr(im, "display_settings", None), ("display_device",))):
+                for attr in attrs:
+                    if obj is not None and hasattr(obj, attr):
+                        self.keep(obj, attr)
         if self.movie:
             # lossless frames first (Blender 5 keeps movie and image formats apart); movie.py makes the movie
             im = r.image_settings
@@ -515,8 +566,9 @@ class Job:
         self.handler = bpy.types.SpaceView3D.draw_handler_add(self.on_draw, (), "WINDOW", "PRE_VIEW")
         self.image = bpy.data.images.new(".dlss_render_plus_out", self.W, self.H, alpha=True, float_buffer=True)
 
-    def restore(self):
-        """Put everything back. Must not run inside an operator's event handling (it switches screens)."""
+    def restore_data(self):
+        """Put back every setting the job changed, but not the screen. Safe inside an operator (file save/load,
+        add-on disable); restore() does the rest from the timer."""
         if self.movie:
             self.movie.kill()
         if self.handler:
@@ -529,8 +581,10 @@ class Job:
                 pass
         # Output format settings depend on each other (a colour depth or format is only accepted while the media
         # type / format allows it), so in reverse some are refused: set them again, media type and format first.
+        fmt = (bpy.types.ImageFormatSettings, bpy.types.ColorManagedInputColorspaceSettings,
+               bpy.types.ColorManagedViewSettings, bpy.types.ColorManagedDisplaySettings)
         for obj, attr, value in self.kept:
-            if isinstance(obj, bpy.types.ImageFormatSettings):
+            if isinstance(obj, fmt):
                 try:
                     setattr(obj, attr, value)
                 except Exception:
@@ -542,6 +596,24 @@ class Job:
             except Exception:
                 pass
         self.unhidden = []
+
+    def stop_now(self, reason):
+        """End at once from inside an operator (file load, add-on disable): settings back, timer and drawing
+        stopped. The maximized viewport stays (Ctrl+Space), since screens can't be switched from there."""
+        self.restore_data()
+        drop_timer(self)
+        if self.image:
+            try:
+                bpy.data.images.remove(self.image)
+            except Exception:
+                pass
+            self.image = None
+        self.level, self.message = "WARNING", f"DLSS Render stopped: {reason}"
+        self.finished = True
+
+    def restore(self):
+        """Put everything back. Must not run inside an operator's event handling (it switches screens)."""
+        self.restore_data()
         if self.fullscreen:
             try:
                 with self.override():
@@ -605,7 +677,7 @@ class Job:
         ox, oy, tw, th = tile
         # the tile sits at the viewport's bottom-left corner, or centred when the whole output is smaller
         left, bottom = (room[0] - tw) // 2 - ox, (room[1] - th) // 2 - oy
-        yield from self.pan_to(left - self.nudge, bottom - self.nudge)
+        yield from self.pan_to(left - self.nudge, bottom - self.nudge + NUDGE_Y + nudge_y_debug())
         self.watch_rect, self.watch_mark = (left + ox, bottom + oy, tw, th), None
         return (left + ox, bottom + oy, tw, th)
 
@@ -618,7 +690,7 @@ class Job:
         if self.movie:
             path = self.movie.frame_file(frame)
         else:
-            path = bpy.path.abspath(self.scene.render.frame_path(frame=frame))
+            path = self.output_path(frame)
             if not self.animation:
                 path = free_name(path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -861,10 +933,13 @@ class Job:
         """Application timer. All the work happens here, outside any operator's event handling: switching screens
         from inside a modal operator leaves Blender holding a dead area and crashes it."""
         global ACTIVE
+        if self.finished:       # stopped from outside (file load, add-on disabled): never touch the viewport again
+            return None
         if not self.step():
             return 0.005
         print(self.message)
         ACTIVE = None
+        keep_awake(False)       # here too: the operator never hears of the end if its window was closed
         return None
 
     def step(self):
@@ -872,8 +947,11 @@ class Job:
         try:
             if not self.advance():
                 return False
+            if self.skipped:
+                self.message += f" ({self.skipped} frames were already saved and kept: Overwrite is off)"
         except Cancelled:
-            self.level, self.message = "WARNING", f"DLSS Render cancelled after {self.done_frames} of {self.total} steps"
+            self.level = "WARNING"
+            self.message = self.stop_reason or f"DLSS Render cancelled after {self.done_frames} of {self.total} steps"
         except JobError as e:
             self.level, self.message = "ERROR", str(e)
         except Exception as e:
@@ -885,6 +963,50 @@ class Job:
             traceback.print_exc()
         self.finished = True
         return True
+
+
+@bpy.app.handlers.persistent
+def on_save_pre(*_args):
+    """Saving during a render would store the render's temporary settings (unhidden objects, render subdivision,
+    EXR output...) in the .blend. Put them back first and end the render; Resume can continue a queue."""
+    job = ACTIVE
+    if job is None or job.finished:
+        return
+    job.stop_reason = "DLSS Render stopped because the file was saved."
+    if hasattr(job, "stop_for_save"):
+        job.stop_for_save()
+    else:
+        job.restore_data()
+        job.cancel = True
+
+
+@bpy.app.handlers.persistent
+def on_load_pre(*_args):
+    stop_running("another file was opened.")
+
+
+def drop_timer(job):
+    fn = getattr(job, "timer_fn", None)
+    if fn is not None and bpy.app.timers.is_registered(fn):
+        bpy.app.timers.unregister(fn)
+
+
+def stop_running(reason):
+    """End the running job at once (file load, add-on disabled): nothing of it may outlive the data it uses."""
+    global ACTIVE
+    job = ACTIVE
+    if job is None:
+        return
+    try:
+        job.stop_now(reason)
+    except Exception:
+        traceback.print_exc()
+    ACTIVE = None
+    keep_awake(False)
+    try:
+        bpy.context.window_manager.progress_end()
+    except Exception:
+        pass
 
 
 class Runner:
@@ -900,7 +1022,10 @@ class Runner:
         wm.progress_begin(0, 100)
         wm.modal_handler_add(self)
         keep_awake(True)
-        bpy.app.timers.register(job.tick, first_interval=0.05)
+        # keep the exact function that is registered: each "job.tick" is a new bound method, and the timers module
+        # wouldn't recognise another one when it has to be unregistered
+        job.timer_fn = job.tick
+        bpy.app.timers.register(job.timer_fn, first_interval=0.05)
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event):

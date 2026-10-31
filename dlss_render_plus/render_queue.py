@@ -2,8 +2,10 @@
 
 Every saved frame is written down in a small JSON file next to the .blend (<name>.dlss_queue.json), so Resume after a
 crash or Esc continues with the frames that are still missing."""
+import contextlib
 import json
 import os
+import shutil
 import tempfile
 import time
 import traceback
@@ -59,10 +61,19 @@ class Store:
         self.save()
 
     def save(self):
+        """Best effort: a locked or read-only progress file (cloud sync, read-only folder) must not stop a render.
+        Resume then falls back to what was written last."""
         tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(self.data, fh)
-        os.replace(tmp, self.path)
+        for attempt in range(3):
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(self.data, fh)
+                os.replace(tmp, self.path)
+                return
+            except OSError as e:
+                if attempt == 2:
+                    print(f"DLSS Render: could not write the queue progress file {self.path}: {e}")
+                time.sleep(0.05)
 
 
 def is_camera(_self, obj):
@@ -81,6 +92,9 @@ class DLSSQueueItem(bpy.types.PropertyGroup):
                                             description="Use the scene's own frame range")
     frame_start: bpy.props.IntProperty(name="Start", default=1)
     frame_end: bpy.props.IntProperty(name="End", default=250)
+    output: bpy.props.StringProperty(name="Output", subtype="FILE_PATH",
+                                     description="Output path for this entry (empty: the scene's own). Use it when "
+                                                 "two entries render the same scene, e.g. with different cameras")
     status: bpy.props.StringProperty()
 
 
@@ -113,31 +127,55 @@ class QueueJob:
         self.cancel = False
         self.finished = False
         self.level, self.message = "INFO", ""
+        self.stop_reason = ""
         self.store = Store()
         self.queue = self.home.dlss_render_plus.queue
         self.plan = []
+        # entries copied with their scene (Scene > Full Copy) keep the same id: give this queue's copies their own,
+        # or the two queues would share their progress
+        others = {i.uid for sc in bpy.data.scenes if sc != self.home for i in sc.dlss_render_plus.queue if i.uid}
+        seen = set()
+        for item in self.queue:
+            if not item.uid or item.uid in others or item.uid in seen:
+                item.uid = uuid.uuid4().hex
+            seen.add(item.uid)
+        outputs = {}
         for item in self.queue:
             if not item.enabled or item.scene is None:
-                continue
-            if not item.uid:
-                item.uid = uuid.uuid4().hex
-            if not resume:
-                self.store.clear(item.uid)      # only this queue's entries: other scenes keep their progress
-            elif self.store.complete(item.uid):
-                item.status = "Done"
                 continue
             frames = item_frames(item, item.scene)
             if not frames:
                 continue
-            if item.scene.render.is_movie_format and item.animation:
+            out = os.path.normcase(bpy.path.abspath(item.output or item.scene.render.filepath))
+            clash = outputs.get(out)
+            if clash and set(frames) & clash[1]:
+                raise render.JobError(f"Two queue entries save to the same files ({item.output or item.scene.render.filepath}): "
+                                      "give one of them its own Output path.")
+            outputs[out] = (item, set(frames))
+        for item in self.queue:
+            if not item.enabled or item.scene is None:
+                continue
+            frames = item_frames(item, item.scene)
+            if not frames:
+                continue
+            with self.output_of(item):
+                movie_item = item.scene.render.is_movie_format and item.animation
+                folder = movie.frames_dir(item.scene, frames) if movie_item else None
+            if not resume:
+                self.store.clear(item.uid)      # only this queue's entries: other scenes keep their progress
+                if folder and os.path.basename(folder).endswith("_frames"):
+                    shutil.rmtree(folder, ignore_errors=True)   # frames of an earlier run must not end up in the movie
+            elif self.store.complete(item.uid):
+                item.status = "Done"
+                continue
+            if movie_item:
                 # a movie is made from its frame files: whatever is missing there has to be rendered again
-                folder = movie.frames_dir(item.scene, frames)
                 todo = [f for f in frames if not os.path.isfile(movie.frame_file(folder, f))]
             else:
                 saved = self.store.done(item.uid)
                 todo = [f for f in frames if f not in saved]
             done = len(frames) - len(todo)
-            self.plan.append((item.uid, item.scene, item.camera, item.animation, frames, todo))
+            self.plan.append((item.uid, item.scene, item.camera, item.animation, frames, todo, item.output))
             item.status = f"{done} of {len(frames)} saved" if done else "Waiting"
         if not self.plan:
             raise render.JobError("Nothing to render: the queue is empty or every entry is done.")
@@ -145,9 +183,23 @@ class QueueJob:
         self.idx = -1
         self.cur = None
         self.cam_kept = None
+        self.out_kept = None
         self.frames_before = 0      # frames of the entries already finished
         self.results = []
         self.spf = None             # seconds per frame seen so far, for the time left of later entries
+
+    @staticmethod
+    @contextlib.contextmanager
+    def output_of(item):
+        """The entry's own output path in place of its scene's, for as long as the block runs."""
+        sc = item.scene
+        old = sc.render.filepath
+        if item.output:
+            sc.render.filepath = item.output
+        try:
+            yield
+        finally:
+            sc.render.filepath = old
 
     def item(self, uid):
         return next((i for i in self.queue if i.uid == uid), None)
@@ -160,11 +212,14 @@ class QueueJob:
     def start_next(self):
         while self.idx + 1 < len(self.plan):
             self.idx += 1
-            uid, scene, camera, animation, frames, todo = self.plan[self.idx]
+            uid, scene, camera, animation, frames, todo, output = self.plan[self.idx]
             self.win.scene = scene
             if camera and scene.camera != camera:
                 self.cam_kept = (scene, scene.camera)
                 scene.camera = camera
+            if output:
+                self.out_kept = (scene, scene.render.filepath)
+                scene.render.filepath = output
             try:
                 self.cur = render.Job(None, animation, scene=scene, window=self.win, frames=todo,
                                       all_frames=frames, on_frame=lambda f, uid=uid: self.store.mark(uid, f))
@@ -179,6 +234,7 @@ class QueueJob:
         return False
 
     def put_camera_back(self):
+        """The entry's camera and output path were set on its scene for the render: give the scene its own back."""
         if self.cam_kept:
             scene, cam = self.cam_kept
             try:
@@ -186,6 +242,35 @@ class QueueJob:
             except Exception:
                 pass
             self.cam_kept = None
+        if self.out_kept:
+            scene, path = self.out_kept
+            try:
+                scene.render.filepath = path
+            except Exception:
+                pass
+            self.out_kept = None
+
+    def stop_for_save(self):
+        """The file is being saved: settings back now (they'd be saved otherwise), the queue stops on its next tick."""
+        if self.cur:
+            self.cur.stop_reason = self.stop_reason
+            self.cur.restore_data()
+            self.cur.cancel = True
+        self.put_camera_back()
+        self.cancel = True
+
+    def stop_now(self, reason):
+        if self.cur:
+            self.cur.stop_now(reason)
+            self.cur = None
+        self.put_camera_back()
+        try:
+            self.win.scene = self.home
+        except Exception:
+            pass
+        render.drop_timer(self)
+        self.level, self.message = "WARNING", f"DLSS Render queue stopped: {reason} Resume continues where it stopped."
+        self.finished = True
 
     def end_current(self):
         job, uid = self.cur, self.plan[self.idx][0]
@@ -206,6 +291,8 @@ class QueueJob:
             self.results.append(f"{job.scene.name}: {job.message}")
 
     def tick(self):
+        if self.finished:       # stopped from outside (file load, add-on disabled)
+            return None
         try:
             if self.cur is None and (self.cancel or not self.start_next()):
                 return self.done()
@@ -235,7 +322,8 @@ class QueueJob:
         n = len(self.plan)
         if self.level == "INFO":
             if self.cancel:
-                self.level, self.message = "WARNING", "DLSS Render queue stopped. Resume continues where it stopped."
+                self.level = "WARNING"
+                self.message = (self.stop_reason or "DLSS Render queue stopped.") + " Resume continues where it stopped."
                 if self.results:
                     self.message += " Failed: " + "; ".join(self.results)
             elif self.results:
@@ -246,6 +334,7 @@ class QueueJob:
         print(self.message)
         self.finished = True
         render.ACTIVE = None
+        render.keep_awake(False)
         return None
 
     def progress(self):
@@ -379,6 +468,7 @@ def draw(layout, context):
         col.prop(it, "scene")
         col.prop(it, "camera")
         col.prop(it, "animation")
+        col.prop(it, "output", placeholder="Scene's own output")
         col.prop(it, "use_scene_range")
         if not it.use_scene_range:
             sub = col.column(align=True)

@@ -22,6 +22,19 @@ These don't need DLSS, only an NVIDIA GPU for the passes test and ffmpeg (with f
 - render passes: every EXR part survives the merge, Combined is replaced and right side up, Cryptomatte metadata is kept, depth values are sensible
 - the queue's progress file and frame lists
 
+```bash
+blender -b --python tests/headless_extra.py
+```
+
+- disabling and enabling the add-on three times in a row
+- installed next to the original DLSS Render (`dlss_render`): both register, and ours keeps working after the original is disabled
+- queue entries and settings survive saving and reopening the .blend, and the progress file sits next to it
+- movie names with `#` in folder names and `###` padding
+- Output > Overwrite off keeps existing frames
+- Render Queue (not Resume) deletes leftover movie frames
+- two entries writing the same files are refused, a copied scene's entry gets its own id, and an entry with its own output is accepted
+- a relative output path in an unsaved file is refused before rendering
+
 ## Live DLSS tests
 
 ```bash
@@ -38,7 +51,41 @@ This one needs a window (not `-b`), an RTX card and working DLSS. It builds a sm
 - the queue: Esc after 3 frames, then Resume finishes the rest without touching the frames already saved, and puts the scene and camera back
 - a movie in the queue: Esc after 4 frames, one frame file deleted, Resume renders what's missing and makes the full movie
 
-Last run on Blender 5.3 beta (f0406d0cb6f5), RTX 4080, driver 616.56: everything passed.
+```bash
+blender --python tests/gui_edge.py
+```
+
+The edge cases, each followed by a check that the viewport, full screen, overlays and sample settings are back:
+
+- a transparent PNG (background alpha 0, objects 1)
+- JPEG at 50% of an odd resolution with frame step 2, with viewport adaptive sampling on (this used to stall small frames for 15 s each)
+- a single-layer EXR
+- a movie at an odd size with frame step 2 (ffmpeg pads it to even)
+- Esc while ffmpeg encodes (no ffmpeg left running), Esc during a passes render (no half-written EXR, settings back)
+- ffmpeg missing, and an output folder that can't be created: both refused before anything changes
+- a 1080p frame forced into tiles compared with the same frame in one tile: no seam
+- 60 frames across the 50-frame restart and a marker cut: no black frames, no brightness jumps
+- a second view layer
+- saving the .blend mid-render: the saved file has the user's settings, not the render's, and the render stops
+- autosave every minute during a 75-frame render: all 75 frames are rendered
+- disabling the add-on mid-render, and opening another file mid-render: the render stops and nothing keeps running
+
+```bash
+blender --python tests/align_gui.py
+blender -b --python tests/align_cmp.py
+```
+
+Renders the showcase frame once per DLSS upscale mode and measures its sub-pixel offset against a Cycles render (phase correlation), to check that the picture lines up. `DLSSPLUS_ALIGN_RES=1920x1080` and `DLSSPLUS_ALIGN_MODES=NONE,BALANCED` pick other sizes and modes.
+
+This is how a 0.6 pixel vertical offset was found, the same in every mode and on both the OpenGL and Vulkan backends. With the correction in `render.py` (`NUDGE_Y`) the offset is:
+
+| Size | Modes | Horizontal | Vertical |
+|---|---|---|---|
+| 1280 x 720 | all five | 0.008 to 0.019 px | -0.039 to -0.010 px |
+| 1920 x 1080 | None, Balanced | 0.017 to 0.019 px | -0.009 to 0.002 px |
+| 1001 x 777 | None, Balanced | 0.001 to 0.006 px | -0.034 to -0.025 px |
+
+Last run on Blender 5.3 beta (f0406d0cb6f5), RTX 4080, driver 616.56, Windows 11: headless 38/38, headless_extra 12/12, gui_test 17/17, gui_edge 28/28.
 
 ## Benchmarks
 

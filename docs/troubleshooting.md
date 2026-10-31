@@ -47,6 +47,22 @@ Blender 5.3 doesn't offer RGBA for ProRes in its output settings, so the add-on 
 
 Render Queue starts every entry from scratch. Resume skips what's done. The progress file is `<blend name>.dlss_queue.json` next to your .blend (or in your temp folder for unsaved files). Deleting it resets every entry.
 
+## "The output path is relative"
+
+A path starting with `//` means "next to the .blend", which doesn't exist until the file is saved. Save the .blend, or pick an absolute output folder in Output Properties.
+
+## "This output size cannot be shown 1:1 in the viewport"
+
+The camera view can only zoom out so far. A very small output (say 25% of a low resolution) on a large monitor can be smaller than the most zoomed-out camera frame. Render at a larger size, or make the 3D Viewport area smaller before you start.
+
+## "Two queue entries save to the same files"
+
+Two entries in the queue would write over each other, usually the same scene with two cameras. Set the Output field of one entry to its own path.
+
+## Linux
+
+Blender's DLSS works on Linux with an NVIDIA RTX card, and the add-on doesn't use anything Windows-only for rendering. It can't keep the screen awake on Linux, though, and a blanked screen can stop the viewport from drawing ("The viewport stopped updating"). Turn off screen blanking for long renders. If ffmpeg isn't found, set its full path (for example `/usr/bin/ffmpeg`) in the add-on preferences.
+
 ## Debug output
 
 Start Blender from a terminal with `DLSS_RENDER_DEBUG=1` set to print what the add-on does on each frame: samples seen, redraws, time per frame, camera cuts.

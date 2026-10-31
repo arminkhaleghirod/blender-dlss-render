@@ -5,10 +5,12 @@ Blender 5.3 can denoise the Cycles viewport with NVIDIA's DLSS Ray Reconstructio
 ## One frame
 
 1. A 3D Viewport is maximized and put in camera view. Overlays, gizmos, header and sidebars are hidden.
-2. The camera view is zoomed until one output pixel is exactly one screen pixel, then nudged by half a DLSS pixel so the picture lines up with where a normal render puts it.
+2. The camera view is zoomed until one output pixel is exactly one screen pixel, then nudged by half a DLSS pixel so the picture lines up with where a normal render puts it. A further 0.58 pixel vertical correction, found by measuring against Cycles, brings the match to within 0.05 pixels in every upscale mode.
 3. The viewport switches to Rendered shading with DLSS as the denoiser and no sample cap.
 4. The add-on watches the picture itself (a few rows and columns of pixels) and counts how often it changes. Each change is one more sample that DLSS has cleaned up. When the count reaches the quality setting (24 on Balanced), the frame is done. Scenes that stop changing early, like flat untextured shots, finish early.
 5. The picture is read straight from the viewport's framebuffer before Blender draws over it. It's scene-linear float with the render's alpha, so it gets saved through Blender's normal color management and file settings, the same way a final render is.
+
+Viewport adaptive sampling is switched off for the render. With it on, a small or simple frame stops sampling before it reaches the count, and the add-on would wait for samples that never come.
 
 Before any of this, every setting that differs between viewport and render is switched to the render value: hidden objects and collections, modifiers that are off in the viewport, subdivision levels, particle display amounts, Simplify. All of it is put back afterwards.
 
@@ -41,10 +43,14 @@ The passes are exact because they come from Cycles, not from the viewport. They 
 
 DLSS leaves some grain on glass and fine detail, and in an animation that grain changes every frame. Steady blends each frame with the previous result, but first clamps the previous result to the range of colors in the 3x3 pixels around each pixel of the new frame. Grain keeps that range wide, so the history passes and the flicker averages out. A moving edge falls outside the range, so the history is cut off there and nothing trails behind. A frame that differs from the last one almost everywhere starts the history over.
 
-It runs on the CPU in NumPy, about 0.7 seconds for a 4K frame on a Ryzen 7 9800X3D.
+It runs on the CPU in NumPy: about 0.1 seconds for a 1080p frame and 0.7 seconds for a 4K frame on a Ryzen 7 9800X3D.
+
+## Saving, opening files and disabling the add-on
+
+A render changes a lot of settings while it runs. If you save the .blend during a render, the add-on puts every setting back first and then stops the render, so the file is saved the way you left it. Blender's autosave doesn't do this (it doesn't touch your file). Opening another file or disabling the add-on stops the render at once. In those two cases the 3D Viewport may stay maximized; Ctrl+Space brings the layout back.
 
 ## The queue
 
-Queue entries are stored in the scene, so they're saved with the .blend. Each entry is a scene, an optional camera, and a frame range, and renders with that scene's DLSS settings. Every saved frame is written to `<blend name>.dlss_queue.json` next to the .blend. Resume reads it and renders only what's missing. Movie entries check the frame files on disk instead, so a deleted frame gets rendered again.
+Queue entries are stored in the scene, so they're saved with the .blend. Each entry is a scene, an optional camera, a frame range and an optional output path, and renders with that scene's DLSS settings. Before anything renders, the queue checks that no two entries write the same files. Every saved frame is written to `<blend name>.dlss_queue.json` next to the .blend. Resume reads it and renders only what's missing. Movie entries check the frame files on disk instead, so a deleted frame gets rendered again.
 
 While a render or queue runs, Windows is kept awake (screen included, since the viewport has to keep drawing), and the status bar shows the frame, samples, progress and the time left.
