@@ -1,0 +1,20 @@
+schema_version = "1.0.0"
+
+id = "dlss_render_plus"
+version = "1.0.0"
+name = "DLSS Render Plus"
+tagline = "DLSS viewport renders with a queue, movies, passes and Steady"
+maintainer = "arminkhaleghirod <https://github.com/arminkhaleghirod>"
+type = "add-on"
+
+website = "https://github.com/arminkhaleghirod/blender-dlss-render"
+
+tags = ["Render"]
+
+blender_version_min = "5.3.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 Armin5D (DLSS Render 1.0.2)", "2026 arminkhaleghirod (DLSS Render Plus)"]
+
+[permissions]
+files = "Save rendered frames, movies and the queue's progress file"
